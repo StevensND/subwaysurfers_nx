@@ -13,7 +13,7 @@ include $(DEVKITPRO)/libnx/switch_rules
 TARGET    := subwaysurfers_nx
 APP_TITLE := Subway Surfers
 APP_AUTHOR := naga
-APP_VERSION := 3.66.1
+APP_VERSION := 1.0.0
 APP_ICON  := $(TOPDIR)/icon.jpg
 export APP_TITLE APP_AUTHOR APP_VERSION APP_ICON
 BUILD     := build
@@ -27,7 +27,7 @@ CFLAGS  := -Wall -O2 -DNDEBUG -ffunction-sections $(ARCH) $(DEFINES) \
 CFLAGS  += -DLOAD_ADDRESS=0xC0000000
 CXXFLAGS := $(CFLAGS) -fno-rtti -fno-exceptions -std=gnu++17
 ASFLAGS := $(ARCH)
-LDFLAGS  = -specs=$(DEVKITPRO)/libnx/switch.specs $(ARCH) -Wl,--gc-sections
+LDFLAGS  = -specs=$(DEVKITPRO)/libnx/switch.specs $(ARCH) -Wl,--gc-sections,--wrap=svcCreateThread
 
 # mesa GLES3 + EGL + nouveau, SDL2 for window/HID/audio, zlib.
 LIBS := -lSDL2 -lGLESv2 -lEGL -lglapi -ldrm_nouveau -lz -lnx -lm

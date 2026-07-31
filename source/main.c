@@ -60,6 +60,81 @@ size_t g_oc_pool_size = 0;
 int    g_oc_want = 0;
 u64    g_stack_base = 0, g_stack_size = 0;
 
+#define TLS_GUARD_SLOTS 96
+#define TLS_GUARD_MAX   128
+
+static Handle g_tls_guard_slots[TLS_GUARD_SLOTS];
+static Handle g_tls_guard_sentinels[TLS_GUARD_MAX - TLS_GUARD_SLOTS];
+static size_t g_tls_guard_slot_count;
+static size_t g_tls_guard_sentinel_count;
+static int g_tls_guard_ready;
+static Mutex g_tls_guard_lock;
+static uint8_t g_tls_guard_stack[0x1000] __attribute__((aligned(0x1000)));
+
+extern Result __real_svcCreateThread(Handle *out, void *entry, void *arg,
+                                     void *stack_top, int prio, int cpuid);
+
+static void tls_guard_entry(void *arg) {
+  (void)arg;
+  svcExitThread();
+}
+
+static size_t tls_pages_in_stack(void) {
+  if (!g_stack_base || !g_stack_size) return 0;
+  const u64 end = g_stack_base + g_stack_size;
+  size_t pages = 0;
+  for (u64 addr = g_stack_base; addr < end; ) {
+    MemoryInfo mi;
+    u32 pi;
+    if (R_FAILED(svcQueryMemory(&mi, &pi, addr))) break;
+    u64 next = mi.addr + mi.size;
+    if (next <= addr) break;
+    if (mi.type == MemType_ThreadLocal) pages += (size_t)(mi.size / 0x1000);
+    addr = next < end ? next : end;
+  }
+  return pages;
+}
+
+static void tls_guard_prepare(void) {
+  if (!tls_pages_in_stack()) return;
+
+  while (g_tls_guard_slot_count < TLS_GUARD_SLOTS) {
+    size_t before = tls_pages_in_stack();
+    Handle handle = INVALID_HANDLE;
+    Result rc = __real_svcCreateThread(&handle, (void *)tls_guard_entry, NULL,
+                                       g_tls_guard_stack + sizeof g_tls_guard_stack,
+                                       0x2C, -2);
+    if (R_FAILED(rc)) break;
+
+    size_t after = tls_pages_in_stack();
+    if (after > before) {
+      if (g_tls_guard_sentinel_count >=
+          sizeof g_tls_guard_sentinels / sizeof g_tls_guard_sentinels[0]) {
+        svcCloseHandle(handle);
+        break;
+      }
+      g_tls_guard_sentinels[g_tls_guard_sentinel_count++] = handle;
+    } else {
+      g_tls_guard_slots[g_tls_guard_slot_count++] = handle;
+    }
+  }
+
+  g_tls_guard_ready = g_tls_guard_slot_count != 0;
+}
+
+Result __wrap_svcCreateThread(Handle *out, void *entry, void *arg,
+                              void *stack_top, int prio, int cpuid) {
+  if (!g_tls_guard_ready)
+    return __real_svcCreateThread(out, entry, arg, stack_top, prio, cpuid);
+
+  mutexLock(&g_tls_guard_lock);
+  if (g_tls_guard_slot_count)
+    svcCloseHandle(g_tls_guard_slots[--g_tls_guard_slot_count]);
+  Result rc = __real_svcCreateThread(out, entry, arg, stack_top, prio, cpuid);
+  mutexUnlock(&g_tls_guard_lock);
+  return rc;
+}
+
 so_module main_mod, unity_mod, il2cpp_mod;
 
 /* defined in libc_shim.c; consumed by the GC stop-the-world bridge there */
@@ -1323,6 +1398,7 @@ int main(int argc, char *argv[]) {
   if (g_oc_want == 1 && g_oc_pool_base) {
     svcGetInfo(&g_stack_base, InfoType_StackRegionAddress, CUR_PROCESS_HANDLE, 0);
     svcGetInfo(&g_stack_size, InfoType_StackRegionSize,    CUR_PROCESS_HANDLE, 0);
+    tls_guard_prepare();
   }
   {
     uintptr_t ps = (uintptr_t)g_oc_pool_base, pe = ps + g_oc_pool_size;

@@ -6,8 +6,7 @@
 /*.apk
 /subwaysurfers_nx.elf
 /subwaysurfers_nx.nacp
-/subwaysurfers_nx_shoptest*.nro
-/subwaysurfers_nx_stable_*.nro
+/*.nro
 
 *.log
 *.csv

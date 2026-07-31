@@ -198,12 +198,22 @@ static void nx_clock_thread(void *arg) {
   }
 }
 static void nx_start_clock_thread(void) {
-  Result create_rc = threadCreate(&g_clock_thr, nx_clock_thread, NULL, NULL,
-                                  0x8000, 0x2C, -2);
-  Result start_rc = R_FAILED(create_rc) ? create_rc : threadStart(&g_clock_thr);
-  if (R_FAILED(create_rc) || R_FAILED(start_rc))
-    fatal_error("Could not start the engine clock thread (%08x/%08x).",
-                create_rc, start_rc);
+  Result create_rc = 0, start_rc = 0;
+  for (int attempt = 0; attempt < 4; attempt++) {
+    memset(&g_clock_thr, 0, sizeof g_clock_thr);
+    create_rc = threadCreate(&g_clock_thr, nx_clock_thread, NULL, NULL,
+                             0x8000, 0x2C, -2);
+    if (R_SUCCEEDED(create_rc)) {
+      start_rc = threadStart(&g_clock_thr);
+      if (R_SUCCEEDED(start_rc)) return;
+      threadClose(&g_clock_thr);
+    } else {
+      start_rc = create_rc;
+    }
+    svcSleepThread(25000000ULL);
+  }
+  fatal_error("Could not start the engine clock thread (%08x/%08x).",
+              create_rc, start_rc);
 }
 static void nx_install_time_fix(void) {
   uintptr_t ub = (uintptr_t)unity_mod.load_virtbase;
@@ -452,7 +462,7 @@ static void migrate_legacy_modules(void) {
 static void cleanup_apk_extract(void) {
   static const char *diagnostics[] = {
     "wallet_debug.log", "save_debug.log", "mmap_debug.log",
-    "bootstrap_telemetry.csv", "pack_io_telemetry.csv",
+    "bootstrap_telemetry.csv", "pack_io_telemetry.csv", ".offline_consent_v1",
   };
   static const char *dirs[] = {
     "META-INF", "res", "kotlin", "explorestack", "google", "okhttp3", "org", "src",
@@ -1207,6 +1217,10 @@ static void *ss_bootstrap_stagefailed_hook(void) { return NULL; }
 #define SS_PROFILE_MERGE_DONE_RVA     0x23F2264u
 /* Let managed HTTP requests reach the socket bridge. */
 #define SS_NET_HASINTERNET            0x3B829A4u
+#define SS_AD_BOOT_CONSENT_RVA        0x2268750u
+#define SS_SET_CONSENT_VALUE_RVA      0x232BDACu
+#define SS_GLOBAL_CONSENT_RVA         0x3C03DB4u
+#define SS_GDPR_CONSENT_GIVEN_RVA     0x232B760u
 static int ss_return_true(void) { return 1; }
 static int ss_return_false(void) { return 0; }
 #define SS_ANDROID_VIB_INIT_RVA        0x22C7B98u
@@ -1409,6 +1423,12 @@ static void nx_install_persistentdatapath_hook(void) {
                     ib + SS_PROFILE_MERGE_DONE_RVA, 0));
   nx_patch_il2cpp_method(SS_NET_HASINTERNET, (void *)&ss_return_true);
 
+  /* Android advertising services are unavailable on Switch. */
+  nx_patch_word(SS_AD_BOOT_CONSENT_RVA, 0x12000008u, 0x2A1F03E8u);
+  nx_patch_word(SS_SET_CONSENT_VALUE_RVA, 0x12000294u, 0x2A1F03F4u);
+  nx_patch_il2cpp_method(SS_GLOBAL_CONSENT_RVA, (void *)&ss_return_false);
+  nx_patch_il2cpp_method(SS_GDPR_CONSENT_GIVEN_RVA, (void *)&ss_return_false);
+
   /* Patch the DNS implementation, not its packed four-byte veneer. */
   nx_patch_il2cpp_method(SS_DNS_IMPL_RVA, (void *)&ss_dns_gethostbyname_icall);
   nx_patch_il2cpp_method(0x3C61144u, (void *)&ss_return_true);
@@ -1425,6 +1445,7 @@ static void nx_install_persistentdatapath_hook(void) {
 
 int main(int argc, char *argv[]) {
   (void)argc; (void)argv;
+  int optimized_assets = 0;
   {
     extern int g_net_on;
     g_net_on = R_SUCCEEDED(socketInitializeDefault()) ? 1 : 0;
@@ -1459,6 +1480,7 @@ int main(int argc, char *argv[]) {
     if (!asset_pack_build(DATA_ROOT "/assets", DATA_ROOT))
       fatal_error("Could not optimize the extracted assets.\n%s\nThe original files were kept.",
                   asset_pack_error());
+    optimized_assets = 1;
   }
   {
     struct stat st;
@@ -1469,6 +1491,8 @@ int main(int argc, char *argv[]) {
       create_asset_skeleton();
     }
   }
+  if (optimized_assets)
+    startup_status_complete("Game data is ready.\n\n  Launch Subway Surfers again to play.");
   startup_status_update("Starting the game");
 
   /* Re-extract IL2CPP resources because writable file mappings are not persisted. */
@@ -1484,6 +1508,7 @@ int main(int argc, char *argv[]) {
     svcGetInfo(&g_stack_size, InfoType_StackRegionSize,    CUR_PROCESS_HANDLE, 0);
     tls_guard_prepare();
   }
+  nx_start_clock_thread();
   {
     uintptr_t ps = (uintptr_t)g_oc_pool_base, pe = ps + g_oc_pool_size;
     int pool_in_stack = g_stack_base && g_oc_pool_base &&
@@ -1529,9 +1554,7 @@ int main(int argc, char *argv[]) {
   }
   if (g_oc_want == 2) {
     tls_guard_release_slots();
-    svcSleepThread(50000000ULL);
   }
-  nx_start_clock_thread();
 
   /* Match the surface to the physical display. */
   if (appletGetOperationMode() == AppletOperationMode_Console) { screen_width = 1920; screen_height = 1080; }

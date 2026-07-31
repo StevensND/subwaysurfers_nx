@@ -36,6 +36,20 @@ void startup_status_end(void) {
   status_active = 0;
 }
 
+void startup_status_complete(const char *message) {
+  PadState pad;
+  padConfigureInput(1, HidNpadStyleSet_NpadStandard);
+  padInitializeDefault(&pad);
+  printf("\x1b[2J\x1b[H\n\n  Subway Surfers\n\n  %s\n\n  Press A to exit.", message);
+  consoleUpdate(NULL);
+  while (appletMainLoop()) {
+    padUpdate(&pad);
+    if (padGetButtonsDown(&pad) & HidNpadButton_A) break;
+  }
+  startup_status_end();
+  exit(0);
+}
+
 void fatal_error(const char *fmt, ...) {
   char message[1024];
   va_list list;

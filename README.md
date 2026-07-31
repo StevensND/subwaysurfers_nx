@@ -1,6 +1,9 @@
-![Banner](extras/banner.png)
+<div align=center>
 
-# Subway Surfers — Nintendo Switch port
+<img src="extras/banner.png" alt="Banner" width="35%">
+
+</div>
+<h1 align=center>Subway Surfers — Nintendo Switch port</h1>
 
 A wrapper/port of the Android release of Subway Surfers (v3.66.1). It loads the
 original game binaries (`libmain.so`, `libunity.so` and `libil2cpp.so`, Unity

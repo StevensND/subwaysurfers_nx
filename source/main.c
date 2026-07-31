@@ -22,6 +22,7 @@
 #include "error.h"
 #include "so_util.h"
 #include "imports.h"
+#include "libc_shim.h"
 #include "jni_fake.h"
 #include "android_native_unity.h"
 #include "opensles.h"
@@ -96,7 +97,8 @@ static size_t tls_pages_in_stack(void) {
 }
 
 static void tls_guard_prepare(void) {
-  if (!tls_pages_in_stack()) return;
+  size_t initial_pages = tls_pages_in_stack();
+  if (!initial_pages) return;
 
   while (g_tls_guard_slot_count < TLS_GUARD_SLOTS) {
     size_t before = tls_pages_in_stack();
@@ -120,6 +122,14 @@ static void tls_guard_prepare(void) {
   }
 
   g_tls_guard_ready = g_tls_guard_slot_count != 0;
+}
+
+static void tls_guard_release_slots(void) {
+  mutexLock(&g_tls_guard_lock);
+  while (g_tls_guard_slot_count)
+    svcCloseHandle(g_tls_guard_slots[--g_tls_guard_slot_count]);
+  g_tls_guard_ready = 0;
+  mutexUnlock(&g_tls_guard_lock);
 }
 
 Result __wrap_svcCreateThread(Handle *out, void *entry, void *arg,
@@ -188,9 +198,12 @@ static void nx_clock_thread(void *arg) {
   }
 }
 static void nx_start_clock_thread(void) {
-  Result rc = threadCreate(&g_clock_thr, nx_clock_thread, NULL, NULL, 0x8000, 0x2C, -2);
-  if (R_FAILED(rc) || R_FAILED(threadStart(&g_clock_thr)))
-    fatal_error("Could not start the engine clock thread.");
+  Result create_rc = threadCreate(&g_clock_thr, nx_clock_thread, NULL, NULL,
+                                  0x8000, 0x2C, -2);
+  Result start_rc = R_FAILED(create_rc) ? create_rc : threadStart(&g_clock_thr);
+  if (R_FAILED(create_rc) || R_FAILED(start_rc))
+    fatal_error("Could not start the engine clock thread (%08x/%08x).",
+                create_rc, start_rc);
 }
 static void nx_install_time_fix(void) {
   uintptr_t ub = (uintptr_t)unity_mod.load_virtbase;
@@ -437,6 +450,10 @@ static void migrate_legacy_modules(void) {
 
 /* Remove files supplied by Android packaging but unused by the native host. */
 static void cleanup_apk_extract(void) {
+  static const char *diagnostics[] = {
+    "wallet_debug.log", "save_debug.log", "mmap_debug.log",
+    "bootstrap_telemetry.csv", "pack_io_telemetry.csv",
+  };
   static const char *dirs[] = {
     "META-INF", "res", "kotlin", "explorestack", "google", "okhttp3", "org", "src",
     "lib/armeabi-v7a", "assets/ad-viewer", "assets/bm_networks", "assets/dexopt",
@@ -467,6 +484,11 @@ static void cleanup_apk_extract(void) {
     "assets/mbridge_download_dialog_view.xml", "assets/mraid-bridge.js",
     "assets/mraid.js", "assets/rv_binddatas.xml",
   };
+  for (unsigned i = 0; i < sizeof(diagnostics) / sizeof(*diagnostics); i++) {
+    char path[768];
+    snprintf(path, sizeof path, "%s/%s", DATA_ROOT, diagnostics[i]);
+    unlink(path);
+  }
   if (access(DATA_ROOT "/AndroidManifest.xml", F_OK) != 0 &&
       access(DATA_ROOT "/classes.dex", F_OK) != 0 &&
       access(DATA_ROOT "/base.apk", F_OK) != 0 &&
@@ -1007,6 +1029,59 @@ static uint32_t nx_arm64_branch(uintptr_t from, uintptr_t to, int link) {
   return (link ? 0x94000000u : 0x14000000u) |
          ((uint32_t)(delta >> 2) & 0x03ffffffu);
 }
+
+#define SS_WALLET_SET_SILENT_RVA   0x3D0F3BCu
+#define SS_WALLET_GET_RVA          0x3D0ED40u
+#define SS_WALLET_INIT_SET_RET_RVA 0x23DF044u
+#define SS_WALLET_SET_TRAMP_RVA    0x2274B10u
+
+typedef void (*ss_wallet_set_fn)(void *, int, int, int64_t, void *);
+typedef int (*ss_wallet_get_fn)(void *, int, void *);
+
+static ss_wallet_set_fn g_wallet_set_orig;
+static ss_wallet_get_fn g_wallet_get;
+
+static void ss_wallet_set_hook(void *wallet, int type, int value,
+                               int64_t expiration, void *method) {
+  uintptr_t caller = (uintptr_t)__builtin_return_address(0);
+  int before = g_wallet_get(wallet, type, NULL);
+  uintptr_t ib = (uintptr_t)il2cpp_mod.load_virtbase;
+  if (caller == ib + SS_WALLET_INIT_SET_RET_RVA && before > 0) return;
+  g_wallet_set_orig(wallet, type, value, expiration, method);
+}
+
+static void *nx_install_method_hook(uint32_t rva, uint32_t expected,
+                                    uint32_t trampoline_rva, void *hook) {
+  uintptr_t ib = (uintptr_t)il2cpp_mod.load_virtbase;
+  uintptr_t entry = ib + rva;
+  uintptr_t trampoline = ib + trampoline_rva;
+  if (*(volatile uint32_t *)entry != expected)
+    fatal_error("Unsupported libil2cpp.so wallet patch site.");
+  uint32_t code[8];
+  for (size_t i = 0; i < 4; i++) code[i] = ((volatile uint32_t *)entry)[i];
+  code[4] = 0x58000050u;
+  code[5] = 0xD61F0200u;
+  code[6] = (uint32_t)((entry + 16) & 0xffffffffu);
+  code[7] = (uint32_t)((entry + 16) >> 32);
+  if (so_patch_code((void *)trampoline, code, sizeof code) != 0)
+    fatal_error("Could not install the wallet patch trampoline.");
+  uint32_t stub[4] = {
+    0x58000050u, 0xD61F0200u,
+    (uint32_t)((uintptr_t)hook & 0xffffffffu),
+    (uint32_t)((uintptr_t)hook >> 32),
+  };
+  if (so_patch_code((void *)entry, stub, sizeof stub) != 0)
+    fatal_error("Could not install the wallet patch.");
+  return (void *)trampoline;
+}
+
+static void nx_install_wallet_guard(void) {
+  uintptr_t ib = (uintptr_t)il2cpp_mod.load_virtbase;
+  g_wallet_get = (ss_wallet_get_fn)(ib + SS_WALLET_GET_RVA);
+  g_wallet_set_orig = (ss_wallet_set_fn)nx_install_method_hook(
+    SS_WALLET_SET_SILENT_RVA, 0xD10103FFu, SS_WALLET_SET_TRAMP_RVA, (void *)&ss_wallet_set_hook);
+}
+
 /* Reject invalid class pointers before IsAssignableFrom dereferences them. */
 #define SS_ISASSIGN_ENTRY_RVA   0x1E376A4u
 #define SS_ISASSIGN_ENTRY_WORD  0xa9bd5ffeu   /* stp x30,x23,[sp,#-48]! -- verified before patch */
@@ -1128,6 +1203,8 @@ static void *ss_bootstrap_stagefailed_hook(void) { return NULL; }
 /* Accept the local guest identity without a server verification round trip. */
 #define SS_AUTH_STATE_LOADED          0x3BDF268u
 #define SS_AUTH_STATE_VERIFIED        0x3BDF308u
+#define SS_PROFILE_MERGE_BEGIN_RVA    0x23F21A4u
+#define SS_PROFILE_MERGE_DONE_RVA     0x23F2264u
 /* Let managed HTTP requests reach the socket bridge. */
 #define SS_NET_HASINTERNET            0x3B829A4u
 static int ss_return_true(void) { return 1; }
@@ -1275,6 +1352,7 @@ static void nx_install_offline_iap(void) {
 #define SS_SOCIAL_PROVIDER_ALLOWED_RVA   0x2479CACu
 static void nx_install_persistentdatapath_hook(void) {
   uintptr_t ub = (uintptr_t)unity_mod.load_virtbase;
+  uintptr_t ib = (uintptr_t)il2cpp_mod.load_virtbase;
   g_il2cpp_string_new = (void *(*)(const char *))so_try_find_addr_rx(&il2cpp_mod, "il2cpp_string_new");
   if (!g_il2cpp_string_new) fatal_error("il2cpp_string_new is unavailable.");
   g_il2cpp_array_new = (void *(*)(void *, unsigned long))so_try_find_addr_rx(&il2cpp_mod, "il2cpp_array_new");
@@ -1308,6 +1386,7 @@ static void nx_install_persistentdatapath_hook(void) {
   nx_redirect_il2cpp_method(SS_BOOT_AUTH_REFRESH_DOEXEC,   SS_BOOT_NULL_DOEXEC);
   nx_redirect_il2cpp_method(SS_BOOT_AUTH_WITHSTORE_DOEXEC, SS_BOOT_NULL_DOEXEC);
   nx_redirect_il2cpp_method(SS_BOOT_AUTH_INIT_DOEXEC,      SS_BOOT_NULL_DOEXEC);
+  nx_install_wallet_guard();
 
   nx_patch_il2cpp_method(SS_ANDROID_VIB_INIT_RVA, (void *)&ss_vibration_init_hook);
   nx_patch_il2cpp_method(SS_ANDROID_VIB_STANDARD_RVA, (void *)&ss_vibration_standard_hook);
@@ -1323,6 +1402,11 @@ static void nx_install_persistentdatapath_hook(void) {
 
   nx_patch_il2cpp_method(SS_BOOT_ONSTAGEFAILED, (void *)&ss_bootstrap_stagefailed_hook);
   nx_redirect_il2cpp_method(SS_AUTH_STATE_LOADED, SS_AUTH_STATE_VERIFIED);
+  nx_patch_word(
+    SS_PROFILE_MERGE_BEGIN_RVA,
+    0xB4000BD4u,
+    nx_arm64_branch(ib + SS_PROFILE_MERGE_BEGIN_RVA,
+                    ib + SS_PROFILE_MERGE_DONE_RVA, 0));
   nx_patch_il2cpp_method(SS_NET_HASINTERNET, (void *)&ss_return_true);
 
   /* Patch the DNS implementation, not its packed four-byte veneer. */
@@ -1443,6 +1527,11 @@ int main(int argc, char *argv[]) {
       }
     }
   }
+  if (g_oc_want == 2) {
+    tls_guard_release_slots();
+    svcSleepThread(50000000ULL);
+  }
+  nx_start_clock_thread();
 
   /* Match the surface to the physical display. */
   if (appletGetOperationMode() == AppletOperationMode_Console) { screen_width = 1920; screen_height = 1080; }
@@ -1565,8 +1654,6 @@ int main(int argc, char *argv[]) {
       }
     }
   }
-  nx_start_clock_thread();
-
   while (appletMainLoop() && !jni_quit_requested) {
     android_native_update_mode();
     android_native_vibration_update();

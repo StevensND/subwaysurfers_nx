@@ -301,6 +301,50 @@ int mkdir_fake(const char *path, unsigned mode) {
   return r;
 }
 
+int remove_fake(const char *path) {
+  if (!path) { errno = EINVAL; return -1; }
+  char nb[600];
+  return remove(dev_abs(path, nb, sizeof nb));
+}
+
+int rename_fake(const char *old_path, const char *new_path) {
+  if (!old_path || !new_path) { errno = EINVAL; return -1; }
+  char old_nb[600], new_nb[600];
+  old_path = dev_abs(old_path, old_nb, sizeof old_nb);
+  new_path = dev_abs(new_path, new_nb, sizeof new_nb);
+  mkdir_parents(new_path);
+  return rename(old_path, new_path);
+}
+
+int rmdir_fake(const char *path) {
+  if (!path) { errno = EINVAL; return -1; }
+  char nb[600];
+  return rmdir(dev_abs(path, nb, sizeof nb));
+}
+
+int unlink_fake(const char *path) {
+  if (!path) { errno = EINVAL; return -1; }
+  char nb[600];
+  return unlink(dev_abs(path, nb, sizeof nb));
+}
+
+int truncate_fake(const char *path, long length) {
+  if (!path || length < 0) { errno = EINVAL; return -1; }
+  char nb[600];
+  return truncate(dev_abs(path, nb, sizeof nb), (off_t)length);
+}
+
+int ftruncate_fake(int fd, long length) {
+  if (length < 0) { errno = EINVAL; return -1; }
+  if (asset_pack_fd_is(fd)) { errno = EROFS; return -1; }
+  return ftruncate(fd, (off_t)length);
+}
+
+int fsync_fake(int fd) {
+  if (asset_pack_fd_is(fd)) return 0;
+  return fsync(fd);
+}
+
 /* Read-ahead windows for Unity archives. */
 #define RA_SLOTS 8
 #define RA_WIN   (1u << 20)     /* 1 MB read-ahead window */
@@ -1221,11 +1265,15 @@ size_t fread_fake(void *ptr, size_t size, size_t n, FILE *f) {
 }
 int fputc_fake(int c, FILE *f) { if (is_fake_file(f)) return c; return fputc(c, f); }
 int fputs_fake(const char *s, FILE *f) { if (is_fake_file(f)) return 0; return fputs(s, f); }
-int fflush_fake(FILE *f) { if (is_fake_file(f) || f == NULL) return 0; return fflush(f); }
+int fflush_fake(FILE *f) {
+  if (is_fake_file(f) || f == NULL) return 0;
+  return fflush(f);
+}
 int fclose_fake(FILE *f) {
   if (is_fake_file(f)) return 0;
   int packed = packed_fclose(f);
-  return packed ? packed < 0 ? -1 : 0 : fclose(f);
+  if (packed) return packed < 0 ? -1 : 0;
+  return fclose(f);
 }
 int ferror_fake(FILE *f) { if (is_fake_file(f)) return 0; return ferror(f); }
 int feof_fake(FILE *f) { if (is_fake_file(f)) return 1; return feof(f); }

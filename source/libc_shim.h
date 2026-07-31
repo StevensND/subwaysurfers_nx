@@ -30,6 +30,13 @@ long sysconf_fake(int name);
 // fs
 int open_fake(const char *path, int flags, ...);
 int mkdir_fake(const char *path, unsigned mode);
+int remove_fake(const char *path);
+int rename_fake(const char *old_path, const char *new_path);
+int rmdir_fake(const char *path);
+int unlink_fake(const char *path);
+int truncate_fake(const char *path, long length);
+int ftruncate_fake(int fd, long length);
+int fsync_fake(int fd);
 struct bionic_stat;
 int stat_fake(const char *path, struct bionic_stat *st);
 int fstat_fake(int fd, struct bionic_stat *st);

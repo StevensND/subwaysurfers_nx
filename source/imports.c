@@ -283,9 +283,6 @@ static DIR *opendir_fake(const char *path) {
   return opendir(path);
 }
 static int chmod_stub(const char *path, int mode) { (void)path; (void)mode; return 0; }
-static int truncate_stub(const char *path, long len) { (void)path; (void)len; return 0; }
-static int ftruncate_stub(int fd, long len) { (void)fd; (void)len; return 0; }
-static int fsync_stub(int fd) { (void)fd; return 0; }
 static int dup2_stub(int a, int b) {
   if (asset_pack_fd_is(a)) return asset_pack_dup2_fd(a, b);
   (void)a;
@@ -454,8 +451,8 @@ DynLibFunction dynlib_functions[] = {
   { "vfprintf", (uintptr_t)&vfprintf_fake }, { "fputc", (uintptr_t)&fputc_fake },
   { "fputs", (uintptr_t)&fputs_fake }, { "fgets", (uintptr_t)&fgets_fake },
   { "feof", (uintptr_t)&feof_fake }, { "ferror", (uintptr_t)&ferror_fake },
-  { "fileno", (uintptr_t)&fileno_fake }, { "remove", (uintptr_t)&remove },
-  { "rename", (uintptr_t)&rename },
+  { "fileno", (uintptr_t)&fileno_fake }, { "remove", (uintptr_t)&remove_fake },
+  { "rename", (uintptr_t)&rename_fake },
 
   /* Filesystem */
   { "open", (uintptr_t)&open_fake },
@@ -468,11 +465,11 @@ DynLibFunction dynlib_functions[] = {
   { "stat", (uintptr_t)&stat_fake }, { "fstat", (uintptr_t)&fstat_fake },
   { "lstat", (uintptr_t)&lstat_fake }, { "statfs", (uintptr_t)&statfs_fake },
   { "access", (uintptr_t)&access_impl },
-  { "mkdir", (uintptr_t)&mkdir_fake }, { "rmdir", (uintptr_t)&rmdir },
-  { "unlink", (uintptr_t)&unlink }, { "getcwd", (uintptr_t)&getcwd_fake },
+  { "mkdir", (uintptr_t)&mkdir_fake }, { "rmdir", (uintptr_t)&rmdir_fake },
+  { "unlink", (uintptr_t)&unlink_fake }, { "getcwd", (uintptr_t)&getcwd_fake },
   { "chmod", (uintptr_t)&chmod_stub }, { "fchmod", (uintptr_t)&fchmod_stub },
-  { "truncate", (uintptr_t)&truncate_stub },
-  { "ftruncate", (uintptr_t)&ftruncate_stub }, { "fsync", (uintptr_t)&fsync_stub },
+  { "truncate", (uintptr_t)&truncate_fake },
+  { "ftruncate", (uintptr_t)&ftruncate_fake }, { "fsync", (uintptr_t)&fsync_fake },
   { "link", (uintptr_t)&link_stub }, { "symlink", (uintptr_t)&symlink_stub },
   { "readlink", (uintptr_t)&readlink_stub }, { "utime", (uintptr_t)&ret0_i },
   { "sendfile", (uintptr_t)&sendfile_stub },

@@ -126,7 +126,6 @@ void android_get_orientation(float *x, float *y, float *z){
 static PadState g_pad;
 static HidTouchScreenState g_touch;
 static int   g_prev_touch = 0;        /* pointers down last frame */
-static float g_cursor_x = 640, g_cursor_y = 360;
 static float g_last_tx = 640, g_last_ty = 360;
 static int   g_prev_a = 0;
 
@@ -217,9 +216,54 @@ void android_native_vibration_shutdown(void) {
 /* nativeInjectEvent(env, thiz, event, flags). */
 typedef uint8_t (*inject_fn)(void*,void*,void*,int);
 
+/* --- Gamepad -> swipe gestures --------------------------------------------- *
+ * Subway Surfers is driven by swipes (up=jump, down=roll, left/right=lane), not
+ * by a cursor. We turn a D-pad press or a stick flick into a short synthetic
+ * swipe: an ACTION_DOWN at a start point, a few ACTION_MOVE steps toward the
+ * direction, then an ACTION_UP. The game reads the delta and direction. A swipe
+ * plays out over several frames so the motion is registered as a gesture, not a
+ * tap. Only one swipe runs at a time; new direction presses are ignored until the
+ * current swipe finishes, which matches how the game consumes them. */
+enum { SWIPE_NONE = 0, SWIPE_UP, SWIPE_DOWN, SWIPE_LEFT, SWIPE_RIGHT };
+
+static int   g_swipe_dir   = SWIPE_NONE;
+static int   g_swipe_step  = -1;        /* -1 = not swiping */
+static int   g_prev_dir    = SWIPE_NONE; /* direction last frame, for edge detection */
+#define SWIPE_STEPS 3                    /* frames from DOWN to UP (shorter = snappier) */
+
+static int stick_dir(HidAnalogStickState ls) {
+  /* Deadzones as a fraction of full range (max 32767). The vertical deadzone is
+   * larger than the horizontal one: resting thumbs tend to drift down, which was
+   * read as a phantom "down" (roll). Lane changes (left/right) stay responsive
+   * with the smaller horizontal deadzone; jump/roll (up/down) need a more
+   * deliberate push. */
+  const int DZ_H = 15000;   /* ~46% horizontal */
+  const int DZ_V = 20000;   /* ~61% vertical   */
+  int ax = ls.x, ay = ls.y;
+  int aax = ax < 0 ? -ax : ax, aay = ay < 0 ? -ay : ay;
+
+  /* Pick the dominant axis, then require that axis to clear its own deadzone. */
+  if (aax >= aay) {
+    if (aax < DZ_H) return SWIPE_NONE;
+    return ax > 0 ? SWIPE_RIGHT : SWIPE_LEFT;
+  } else {
+    if (aay < DZ_V) return SWIPE_NONE;
+    return ay > 0 ? SWIPE_UP : SWIPE_DOWN;    /* stick up = +y */
+  }
+}
+
+static int button_dir(u64 btn) {
+  if (btn & (HidNpadButton_Up    | HidNpadButton_StickLUp    | HidNpadButton_StickRUp))    return SWIPE_UP;
+  if (btn & (HidNpadButton_Down  | HidNpadButton_StickLDown  | HidNpadButton_StickRDown))  return SWIPE_DOWN;
+  if (btn & (HidNpadButton_Left  | HidNpadButton_StickLLeft  | HidNpadButton_StickRLeft))  return SWIPE_LEFT;
+  if (btn & (HidNpadButton_Right | HidNpadButton_StickLRight | HidNpadButton_StickRRight)) return SWIPE_RIGHT;
+  return SWIPE_NONE;
+}
+
 void android_native_feed_hid(inject_fn inject, void *env, void *thiz){
   padUpdate(&g_pad);
 
+  /* Real touchscreen always wins, so handheld touch keeps working. */
   int n = hidGetTouchScreenStates(&g_touch, 1);
   if (n > 0 && g_touch.count > 0){
     int   ids[UI_MAX_POINTERS]; float xs[UI_MAX_POINTERS]; float ys[UI_MAX_POINTERS];
@@ -243,24 +287,76 @@ void android_native_feed_hid(inject_fn inject, void *env, void *thiz){
     return;
   }
 
-  HidAnalogStickState ls = padGetStickPos(&g_pad, 0);
-  g_cursor_x += (ls.x / 32767.0f) * 14.0f;
-  g_cursor_y -= (ls.y / 32767.0f) * 14.0f;
-  if (g_cursor_x < 0) g_cursor_x = 0;
-  if (g_cursor_x > g_w) g_cursor_x = g_w;
-  if (g_cursor_y < 0) g_cursor_y = 0;
-  if (g_cursor_y > g_h) g_cursor_y = g_h;
+  u64 btn = padGetButtons(&g_pad);
 
-  int a = (padGetButtons(&g_pad) & HidNpadButton_A) ? 1 : 0;
-  int ids[1]={0}; float xs[1]={g_cursor_x}, ys[1]={g_cursor_y};
-  if (a && !g_prev_a)      inject(env, thiz, unity_motionevent(AMOTION_ACTION_DOWN, 1, ids, xs, ys), 0);
-  else if (a && g_prev_a)  inject(env, thiz, unity_motionevent(AMOTION_ACTION_MOVE, 1, ids, xs, ys), 0);
-  else if (!a && g_prev_a) inject(env, thiz, unity_motionevent(AMOTION_ACTION_UP,   1, ids, xs, ys), 0);
-  g_prev_a = a;
+  /* Direction this frame from D-pad or either stick. Computed every frame so a
+   * new direction can interrupt an in-progress swipe (needed to dodge a train at
+   * the last moment). */
+  int dir = button_dir(btn);
+  if (dir == SWIPE_NONE) dir = stick_dir(padGetStickPos(&g_pad, 0));  /* left stick  */
+  if (dir == SWIPE_NONE) dir = stick_dir(padGetStickPos(&g_pad, 1));  /* right stick */
 
+  /* Start a new swipe when the input direction CHANGES to a non-neutral value.
+   * This fires on neutral->dir (a fresh press) AND on dirA->dirB (flick straight
+   * from one direction to another without returning to center), so you can chain
+   * up-then-left instantly. Holding the SAME direction does not re-fire, which is
+   * what kept the old code from double-moving. A new direction also interrupts a
+   * swipe already in progress. */
+  if (dir != SWIPE_NONE && dir != g_prev_dir) {
+    /* If a previous swipe was mid-sequence, close it with an UP at center so the
+     * game does not see a stuck finger, then begin the new one. */
+    if (g_swipe_step >= 0 && g_swipe_dir != SWIPE_NONE) {
+      int ids[1] = {0}; float xs[1] = { g_w * 0.5f }, ys[1] = { g_h * 0.5f };
+      inject(env, thiz, unity_motionevent(AMOTION_ACTION_UP, 1, ids, xs, ys), 0);
+    }
+    g_swipe_dir  = dir;
+    g_swipe_step = 0;           /* restart the sequence for the new direction */
+  }
+  g_prev_dir = dir;
+
+  /* Emit the current step of the active swipe, if any. The sequence is short so
+   * it never blocks the next input for long: DOWN, a couple of MOVEs, then UP. */
+  if (g_swipe_step >= 0 && g_swipe_dir != SWIPE_NONE) {
+    const float cx = g_w * 0.5f, cy = g_h * 0.5f;
+    const float REACH = (g_swipe_dir == SWIPE_LEFT || g_swipe_dir == SWIPE_RIGHT)
+                          ? g_w * 0.30f : g_h * 0.30f;
+    float dx = 0, dy = 0;
+    if (g_swipe_dir == SWIPE_LEFT)  dx = -REACH;
+    if (g_swipe_dir == SWIPE_RIGHT) dx =  REACH;
+    if (g_swipe_dir == SWIPE_UP)    dy = -REACH;   /* screen y grows downward */
+    if (g_swipe_dir == SWIPE_DOWN)  dy =  REACH;
+
+    float t = (float)g_swipe_step / (float)SWIPE_STEPS;   /* 0 .. 1 */
+    int   ids[1] = {0};
+    float xs[1]  = { cx + dx * t };
+    float ys[1]  = { cy + dy * t };
+
+    int action;
+    if (g_swipe_step == 0)                action = AMOTION_ACTION_DOWN;
+    else if (g_swipe_step >= SWIPE_STEPS) action = AMOTION_ACTION_UP;
+    else                                  action = AMOTION_ACTION_MOVE;
+
+    inject(env, thiz, unity_motionevent(action, 1, ids, xs, ys), 0);
+
+    g_swipe_step++;
+    if (g_swipe_step > SWIPE_STEPS) { g_swipe_step = -1; g_swipe_dir = SWIPE_NONE; }
+    return;
+  }
+
+  /* B still maps to Android BACK (pause / menu back). */
   static int prev_b = 0;
-  int b = (padGetButtons(&g_pad) & HidNpadButton_B) ? 1 : 0;
+  int b = (btn & HidNpadButton_B) ? 1 : 0;
   if (b && !prev_b) inject(env, thiz, unity_keyevent(AKEY_ACTION_DOWN, AKEYCODE_BACK), 0);
   if (!b && prev_b) inject(env, thiz, unity_keyevent(AKEY_ACTION_UP,   AKEYCODE_BACK), 0);
   prev_b = b;
+
+  /* A taps the center of the screen (menus, "tap to continue", start). */
+  int a = (btn & HidNpadButton_A) ? 1 : 0;
+  if (a != g_prev_a) {
+    const float cx = g_w * 0.5f, cy = g_h * 0.5f;
+    int ids[1] = {0}; float xs[1] = { cx }, ys[1] = { cy };
+    inject(env, thiz,
+           unity_motionevent(a ? AMOTION_ACTION_DOWN : AMOTION_ACTION_UP, 1, ids, xs, ys), 0);
+    g_prev_a = a;
+  }
 }

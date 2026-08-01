@@ -40,6 +40,23 @@ Launch with a game override (hold R while starting a title) or a forwarder with
 full application memory. Album applet mode does not provide enough memory or
 the required code-memory permissions.
 
+## Controls
+
+Subway Surfers is driven by swipe gestures, so the analog sticks and D-pad are
+mapped to synthetic swipes. The touchscreen still works in handheld mode.
+
+| Input | Action |
+| --- | --- |
+| D-pad / Left stick / Right stick — Up | Jump (swipe up) |
+| D-pad / Left stick / Right stick — Down | Roll (swipe down) |
+| D-pad / Left stick / Right stick — Left / Right | Change lane (swipe left / right) |
+| A | Tap centre (confirm in menus) |
+| B | Android back |
+
+A new direction fires immediately and interrupts an in-progress swipe, so you
+can change lanes at the last moment to dodge a train. Holding a direction does
+not repeat, so a single push is a single swipe.
+
 ## Build
 
 devkitA64 plus these portlibs:
@@ -49,6 +66,12 @@ pacman -S switch-mesa switch-libdrm_nouveau switch-sdl2 switch-zlib
 ```
 
 Then `make` from a devkitPro shell.
+
+A GitHub Actions workflow (`.github/workflows/build.yml`) is also included: it
+builds the `.nro` on every push using the `devkitpro/devkita64` image and can
+publish it as a release on manual dispatch. A guard step refuses to build if any
+game binary (`.so`, APK, `dump.cs`, `global-metadata`) is ever committed, to
+avoid redistributing copyrighted code.
 
 ## Credits
 

@@ -1,0 +1,68 @@
+name: Build subwaysurfers_nx.nro
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version. Leave it empty to avoid publishing a release.'
+        required: false
+        type: string
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: devkitpro/devkita64:latest
+      options: --user root
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Guard against committed game binaries
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          BAD=$(git ls-files | grep -iE '\.(so|apk|obb|xapk|pack|dat)$|dump\.cs|global-metadata' || true)
+          if [ -n "$BAD" ]; then
+            echo "::error::Game binaries are tracked in this repository. Remove them and rewrite history."
+            exit 1
+          fi
+
+      - name: Build
+        run: make -j$(nproc)
+        env:
+          DEVKITPRO: /opt/devkitpro
+          DEVKITA64: /opt/devkitpro/devkitA64
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: subwaysurfers_nx
+          path: subwaysurfers_nx.nro
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && inputs.version != ''
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: subwaysurfers_nx
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "v${{ inputs.version }}"
+          name: "subwaysurfers_nx v${{ inputs.version }}"
+          files: subwaysurfers_nx.nro
+          draft: false
+          prerelease: false

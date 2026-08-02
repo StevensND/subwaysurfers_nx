@@ -43,7 +43,8 @@ the required code-memory permissions.
 ## Controls
 
 Subway Surfers is driven by swipe gestures, so the analog sticks and D-pad are
-mapped to synthetic swipes. The touchscreen still works in handheld mode.
+mapped to synthetic swipes and the face/shoulder buttons tap the on-screen
+controls. The touchscreen still works in handheld mode.
 
 | Input | Action |
 | --- | --- |
@@ -52,10 +53,22 @@ mapped to synthetic swipes. The touchscreen still works in handheld mode.
 | D-pad / Left stick / Right stick — Left / Right | Change lane (swipe left / right) |
 | A | Tap centre (confirm in menus) |
 | B | Android back |
+| X | Score Booster power-up |
+| Y | Headstart power-up |
+| R | Hoverboard (double-tap) |
+| − or + | Pause |
 
-A new direction fires immediately and interrupts an in-progress swipe, so you
-can change lanes at the last moment to dodge a train. Holding a direction does
-not repeat, so a single push is a single swipe.
+Notes on feel:
+
+- A new direction fires immediately and interrupts an in-progress swipe, so you
+  can change lanes at the last moment to dodge a train. Holding a direction does
+  not repeat, so a single push is a single swipe.
+- The stick deadzones are asymmetric. Up and left/right use a low threshold so a
+  soft flick registers; down uses a higher one, because a resting thumb drifts
+  down and would otherwise trigger a phantom roll. Horizontal input is biased so
+  a diagonal right-and-up push resolves to a lane change rather than a jump.
+- X, Y, R and pause tap fixed on-screen positions expressed as fractions of the
+  screen, so they line up in both handheld and docked.
 
 ## Build
 

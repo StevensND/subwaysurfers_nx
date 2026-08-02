@@ -335,6 +335,15 @@ static EGLBoolean egl_QuerySurface_fake(EGLDisplay d, EGLSurface s, EGLint attr,
   return r;
 }
 
+/* Draw the right-stick cursor overlay on top of the finished frame, then do the
+ * real swap. nxp_draw() saves/restores all GL state and is a no-op while the
+ * cursor is hidden, so this is inert unless the user has toggled the cursor on. */
+extern void nxp_draw(void);
+static EGLBoolean egl_SwapBuffers_cursor(EGLDisplay d, EGLSurface s) {
+  nxp_draw();
+  return eglSwapBuffers(d, s);
+}
+
 DynLibFunction dynlib_functions[] = {
   /* liblog and C++ runtime */
   { "__android_log_print", (uintptr_t)&__android_log_print },
@@ -548,7 +557,7 @@ DynLibFunction dynlib_functions[] = {
   { "eglGetConfigAttrib", (uintptr_t)&eglGetConfigAttrib },
   { "eglCreateWindowSurface", (uintptr_t)&eglCreateWindowSurface },
   { "eglCreateContext", (uintptr_t)&eglCreateContext }, { "eglMakeCurrent", (uintptr_t)&eglMakeCurrent },
-  { "eglSwapBuffers", (uintptr_t)&eglSwapBuffers }, { "eglQuerySurface", (uintptr_t)&egl_QuerySurface_fake },
+  { "eglSwapBuffers", (uintptr_t)&egl_SwapBuffers_cursor }, { "eglQuerySurface", (uintptr_t)&egl_QuerySurface_fake },
   { "eglDestroyContext", (uintptr_t)&eglDestroyContext }, { "eglDestroySurface", (uintptr_t)&eglDestroySurface },
 
   /* GLES2, resolved dynamically by Unity. */

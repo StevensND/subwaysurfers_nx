@@ -30,7 +30,7 @@ ASFLAGS := $(ARCH)
 LDFLAGS  = -specs=$(DEVKITPRO)/libnx/switch.specs $(ARCH) -Wl,--gc-sections,--wrap=svcCreateThread
 
 # mesa GLES3 + EGL + nouveau, SDL2 for window/HID/audio, zlib.
-LIBS := -lSDL2 -lGLESv2 -lEGL -lglapi -ldrm_nouveau -lz -lnx -lm
+LIBS := -lSDL2 -lGLESv2 -lEGL -lglapi -ldrm_nouveau -lpng -lz -lnx -lm
 
 LIBDIRS := $(PORTLIBS) $(LIBNX)
 

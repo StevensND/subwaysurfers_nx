@@ -9,7 +9,7 @@ typedef struct ANativeWindow ANativeWindow;
 typedef struct ALooper       ALooper;
 
 void  android_native_input_init(void);
-void  android_native_update_mode(void);
+int   android_native_update_mode(void);
 void  android_native_feed_hid(uint8_t (*inject)(void*,void*,void*,int),
                               void *env, void *thiz);
 void  android_native_vibration_standard(int length_ms);

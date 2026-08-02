@@ -3,7 +3,9 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
+#include <stdio.h>
 #include <switch.h>
+#include "nx_pointer.h"   /* right-stick cursor / mouse support (menus) */
 
 #ifndef AWINDOW_FORMAT_RGBA_8888
 #define AWINDOW_FORMAT_RGBA_8888 1
@@ -221,6 +223,28 @@ void android_native_vibration_shutdown(void) {
 /* nativeInjectEvent(env, thiz, event, flags). */
 typedef uint8_t (*inject_fn)(void*,void*,void*,int);
 
+/* Lazy one-time init of the right-stick cursor module. Called at the top of
+ * android_native_feed_hid so it runs once the window geometry (g_w/g_h) is known.
+ * Subway Surfers renders landscape, so rotation is 0. The host keeps its own
+ * touch handling, so handle_touch is 0. Settings/cursor.png live under the port's
+ * SD folder; file I/O goes through the port's locked fopen/fclose wrappers. */
+extern FILE *fopen_fake(const char *path, const char *mode);
+extern int   fclose_fake(FILE *f);
+static void nxp_ensure_init(void){
+  static int done = 0;
+  if (done) return;
+  done = 1;
+  NxpConfig c = {0};
+  c.screen_w = (int)g_w; c.screen_h = (int)g_h;   /* render space              */
+  c.panel_w  = 1280;     c.panel_h  = 720;         /* Switch touch panel        */
+  c.data_dir = "sdmc:/switch/subwaysurfers_nx";    /* cursor.png / pointer.cfg  */
+  c.rotation = 0;                                  /* landscape, no rotation    */
+  c.handle_touch = 0;                              /* host keeps its own touch  */
+  c.cursor_id = 0; c.max_touch_slots = UI_MAX_POINTERS;
+  c.fopen_fn = fopen_fake; c.fclose_fn = fclose_fake;
+  nxp_init(&c);
+}
+
 /* --- Gamepad -> swipe gestures --------------------------------------------- *
  * Subway Surfers is driven by swipes (up=jump, down=roll, left/right=lane), not
  * by a cursor. We turn a D-pad press or a stick flick into a short synthetic
@@ -279,6 +303,7 @@ static int button_dir(u64 btn) {
 }
 
 void android_native_feed_hid(inject_fn inject, void *env, void *thiz){
+  nxp_ensure_init();
   padUpdate(&g_pad);
 
   /* Real touchscreen always wins, so handheld touch keeps working. */
@@ -307,12 +332,45 @@ void android_native_feed_hid(inject_fn inject, void *env, void *thiz){
 
   u64 btn = padGetButtons(&g_pad);
 
-  /* Direction this frame from D-pad or either stick. Computed every frame so a
-   * new direction can interrupt an in-progress swipe (needed to dodge a train at
-   * the last moment). */
-  int dir = button_dir(btn);
-  if (dir == SWIPE_NONE) dir = stick_dir(padGetStickPos(&g_pad, 0));  /* left stick  */
-  if (dir == SWIPE_NONE) dir = stick_dir(padGetStickPos(&g_pad, 1));  /* right stick */
+  /* Right-stick cursor (menus). nx_pointer reads the right stick, handles the R3
+   * toggle, and emits pointer events already in screen space; inject each as a
+   * single-pointer motion so taps register like a finger. This runs every frame
+   * regardless of the swipe/character logic below. When the cursor is visible the
+   * right stick is claimed for it (see the movement code above), so it won't also
+   * move the character. Touch above returns early, so this only runs when not
+   * touching. */
+  nxp_update();
+  {
+    NxpEvent pev[8];
+    int pn = nxp_poll(pev, 8);
+    for (int i = 0; i < pn; i++) {
+      int   ids[1] = { 0 };
+      float xs[1]  = { pev[i].x }, ys[1] = { pev[i].y };
+      int action = pev[i].phase == NXP_DOWN ? AMOTION_ACTION_DOWN
+                 : pev[i].phase == NXP_UP   ? AMOTION_ACTION_UP
+                                            : AMOTION_ACTION_MOVE;
+      inject(env, thiz, unity_motionevent(action, 1, ids, xs, ys), 0);
+    }
+  }
+  /* When the cursor is active BOTH sticks drive the pointer and the D-pad adjusts
+   * cursor sensitivity, so none of them may reach character movement. Each stick
+   * also reaches movement via its digital Stick* bits (read by button_dir). Mask
+   * the sticks' digital bits AND the D-pad out of the button word, and skip both
+   * analog reads, so nothing the cursor uses registers as a swipe. */
+  u64 dbtn = btn;
+  if (nxp_cursor_visible())
+    dbtn &= ~(HidNpadButton_StickRUp | HidNpadButton_StickRDown |
+              HidNpadButton_StickRLeft | HidNpadButton_StickRRight |
+              HidNpadButton_StickLUp | HidNpadButton_StickLDown |
+              HidNpadButton_StickLLeft | HidNpadButton_StickLRight |
+              HidNpadButton_Up | HidNpadButton_Down |
+              HidNpadButton_Left | HidNpadButton_Right);
+  int dir = button_dir(dbtn);
+  /* Analog stick reads only when the cursor is NOT active (it owns both sticks). */
+  if (dir == SWIPE_NONE && !nxp_cursor_visible())
+    dir = stick_dir(padGetStickPos(&g_pad, 0));  /* left stick  */
+  if (dir == SWIPE_NONE && !nxp_cursor_visible())
+    dir = stick_dir(padGetStickPos(&g_pad, 1));  /* right stick */
 
   /* Start a new swipe when the input direction CHANGES to a non-neutral value.
    * This fires on neutral->dir (a fresh press) AND on dirA->dirB (flick straight
@@ -368,8 +426,10 @@ void android_native_feed_hid(inject_fn inject, void *env, void *thiz){
   if (!b && prev_b) inject(env, thiz, unity_keyevent(AKEY_ACTION_UP,   AKEYCODE_BACK), 0);
   prev_b = b;
 
-  /* A taps the center of the screen (menus, "tap to continue", start). */
-  int a = (btn & HidNpadButton_A) ? 1 : 0;
+  /* A taps the center of the screen (menus, "tap to continue", start). When the
+   * cursor is active, nx_pointer already uses A to tap AT the cursor, so the
+   * center tap is suppressed to avoid a double tap. */
+  int a = ((btn & HidNpadButton_A) && !nxp_cursor_visible()) ? 1 : 0;
   if (a != g_prev_a) {
     const float cx = g_w * 0.5f, cy = g_h * 0.5f;
     int ids[1] = {0}; float xs[1] = { cx }, ys[1] = { cy };

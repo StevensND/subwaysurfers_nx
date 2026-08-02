@@ -30,7 +30,11 @@ place:
       libil2cpp.so
   assets/
     bin/Data/ ...
+  cursor.png                <- optional, replaces the mouse-mode cursor
 ```
+
+Optionally drop a `cursor.png` (up to 64×64, transparency respected) in the same
+folder to replace the on-screen cursor with your own.
 
 The first launch can take several minutes. The port validates the extracted
 game, removes unused Android files and converts the loose assets into an
@@ -58,17 +62,31 @@ controls. The touchscreen still works in handheld mode.
 | R | Hoverboard (double-tap) |
 | − or + | Pause |
 
-Notes on feel:
+A new direction fires immediately and interrupts an in-progress swipe, so you
+can change lanes at the last moment to dodge a train. Holding a direction does
+not repeat, so a single push is a single swipe.
 
-- A new direction fires immediately and interrupts an in-progress swipe, so you
-  can change lanes at the last moment to dodge a train. Holding a direction does
-  not repeat, so a single push is a single swipe.
-- The stick deadzones are asymmetric. Up and left/right use a low threshold so a
-  soft flick registers; down uses a higher one, because a resting thumb drifts
-  down and would otherwise trigger a phantom roll. Horizontal input is biased so
-  a diagonal right-and-up push resolves to a lane change rather than a jump.
-- X, Y, R and pause tap fixed on-screen positions expressed as fractions of the
-  screen, so they line up in both handheld and docked.
+### Mouse mode
+
+Press **ZL** to toggle an on-screen cursor for navigating menus, shops and
+pop-ups. While the cursor is active:
+
+| Input | Action |
+| --- | --- |
+| ZL | Toggle the cursor on / off |
+| Left stick / Right stick | Move the cursor |
+| A or ZR | Click at the cursor |
+| D-pad — Up / Down | Adjust cursor speed (hold to keep changing it) |
+
+While the cursor is on, both sticks and the D-pad drive it instead of the
+character, so they never register as swipes. Each press of D-pad Up / Down nudges
+the cursor speed up or down, and holding either one keeps adjusting it. The cursor
+draws over dimmed pop-ups, so you can move to the close button and click it.
+
+A USB mouse works in both handheld and docked: move to control the cursor,
+left-click to tap, and use the scroll wheel to change sensitivity. Your stick and
+mouse sensitivities are remembered in `pointer.cfg` automatically after in-game
+adjustment.
 
 ## Build
 

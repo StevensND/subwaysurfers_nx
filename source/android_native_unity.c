@@ -128,6 +128,11 @@ static HidTouchScreenState g_touch;
 static int   g_prev_touch = 0;        /* pointers down last frame */
 static float g_last_tx = 640, g_last_ty = 360;
 static int   g_prev_a = 0;
+static int   g_prev_x = 0;
+static int   g_prev_y = 0;
+static int   g_prev_pause = 0;
+static int   g_prev_r = 0;               /* R last frame, for edge detection */
+static int   g_dtap_step = -1;           /* -1 = idle; 0..N = double-tap sequence frame */
 
 #define VIBRATION_HANDLE_CAP 8
 static HidVibrationDeviceHandle g_vibration_handles[VIBRATION_HANDLE_CAP];
@@ -232,23 +237,36 @@ static int   g_prev_dir    = SWIPE_NONE; /* direction last frame, for edge detec
 #define SWIPE_STEPS 3                    /* frames from DOWN to UP (shorter = snappier) */
 
 static int stick_dir(HidAnalogStickState ls) {
-  /* Deadzones as a fraction of full range (max 32767). The vertical deadzone is
-   * larger than the horizontal one: resting thumbs tend to drift down, which was
-   * read as a phantom "down" (roll). Lane changes (left/right) stay responsive
-   * with the smaller horizontal deadzone; jump/roll (up/down) need a more
-   * deliberate push. */
-  const int DZ_H = 15000;   /* ~46% horizontal */
-  const int DZ_V = 20000;   /* ~61% vertical   */
+  /* Deadzones as a fraction of full range (max 32767).
+   *
+   * Tuning learned from testing:
+   *  - Soft flicks UP weren't detected (e.g. a thumb sliding up off the stick). A
+   *    resting thumb drifts DOWN, not up, so an upward tilt is almost always
+   *    intentional -- UP can therefore have a LOW deadzone (DZ_UP) and still not
+   *    misfire. DOWN keeps a HIGH deadzone (DZ_DOWN) so resting-thumb drift doesn't
+   *    register as a phantom roll. This asymmetry catches soft up-flicks while
+   *    avoiding phantom downs.
+   *  - Soft moves RIGHT/LEFT also need a gentler threshold, so DZ_H is a bit lower.
+   *  - Horizontal is biased (H_BIAS): the vertical component must beat the
+   *    horizontal one by a margin before the vertical axis wins, so a diagonal
+   *    right-up push resolves to right (lane change), not up. */
+  const int DZ_H    = 8000;    /* ~24% horizontal -- catch soft L/R                 */
+  const int DZ_UP   = 9000;    /* ~27% up -- catch soft up-flicks (thumb won't drift up) */
+  const int DZ_DOWN = 20000;   /* ~61% down -- deliberate, avoids phantom roll      */
+  const int H_BIAS  = 9000;    /* vertical must beat horizontal by this to win -- keeps
+                                * a rightward move (even a soft one) from being read as
+                                * up when the thumb drifts up diagonally */
   int ax = ls.x, ay = ls.y;
   int aax = ax < 0 ? -ax : ax, aay = ay < 0 ? -ay : ay;
 
-  /* Pick the dominant axis, then require that axis to clear its own deadzone. */
-  if (aax >= aay) {
+  /* Choose the vertical axis only when it clearly dominates; otherwise horizontal.
+   * Up and down use different deadzones. */
+  if (aay > aax + H_BIAS) {
+    if (ay > 0) return aay >= DZ_UP   ? SWIPE_UP   : SWIPE_NONE;   /* stick up = +y */
+    else        return aay >= DZ_DOWN ? SWIPE_DOWN : SWIPE_NONE;
+  } else {
     if (aax < DZ_H) return SWIPE_NONE;
     return ax > 0 ? SWIPE_RIGHT : SWIPE_LEFT;
-  } else {
-    if (aay < DZ_V) return SWIPE_NONE;
-    return ay > 0 ? SWIPE_UP : SWIPE_DOWN;    /* stick up = +y */
   }
 }
 
@@ -358,5 +376,61 @@ void android_native_feed_hid(inject_fn inject, void *env, void *thiz){
     inject(env, thiz,
            unity_motionevent(a ? AMOTION_ACTION_DOWN : AMOTION_ACTION_UP, 1, ids, xs, ys), 0);
     g_prev_a = a;
+  }
+
+  /* X and Y tap the two run-start power-up buttons in the lower-left corner, so
+   * they can be activated with the controller. Positions are fractions of the
+   * screen (measured from a 1280x720 frame), so they hold in both handheld and
+   * docked. X = Score Booster (upper), Y = Headstart (lower). */
+  int x = (btn & HidNpadButton_X) ? 1 : 0;
+  if (x != g_prev_x) {
+    const float px = g_w * 0.0375f, py = g_h * 0.6458f;   /* (48, 465) / (1280, 720) */
+    int ids[1] = {0}; float xs[1] = { px }, ys[1] = { py };
+    inject(env, thiz,
+           unity_motionevent(x ? AMOTION_ACTION_DOWN : AMOTION_ACTION_UP, 1, ids, xs, ys), 0);
+    g_prev_x = x;
+  }
+
+  int y = (btn & HidNpadButton_Y) ? 1 : 0;
+  if (y != g_prev_y) {
+    const float px = g_w * 0.0438f, py = g_h * 0.8097f;   /* (56, 583) / (1280, 720) */
+    int ids[1] = {0}; float xs[1] = { px }, ys[1] = { py };
+    inject(env, thiz,
+           unity_motionevent(y ? AMOTION_ACTION_DOWN : AMOTION_ACTION_UP, 1, ids, xs, ys), 0);
+    g_prev_y = y;
+  }
+
+  /* Minus and Plus tap the pause icon in the upper-left corner. Either button
+   * works. Position is a fraction of the screen (measured from 1280x720), so it
+   * holds in both handheld and docked. */
+  int pause = (btn & (HidNpadButton_Minus | HidNpadButton_Plus)) ? 1 : 0;
+  if (pause != g_prev_pause) {
+    const float px = g_w * 0.0297f, py = g_h * 0.0528f;   /* (38, 38) / (1280, 720) */
+    int ids[1] = {0}; float xs[1] = { px }, ys[1] = { py };
+    inject(env, thiz,
+           unity_motionevent(pause ? AMOTION_ACTION_DOWN : AMOTION_ACTION_UP, 1, ids, xs, ys), 0);
+    g_prev_pause = pause;
+  }
+
+  /* R activates the hoverboard, which the game triggers on a double-tap. A press
+   * kicks off a short state machine that emits tap, tap at screen centre across a
+   * few frames (DOWN, UP, gap, DOWN, UP) so the game registers a genuine double
+   * tap. Edge-triggered so holding R fires it once. */
+  int r = (btn & HidNpadButton_R) ? 1 : 0;
+  if (r && !g_prev_r && g_dtap_step < 0) g_dtap_step = 0;   /* start on press */
+  g_prev_r = r;
+
+  if (g_dtap_step >= 0) {
+    const float cx = g_w * 0.5f, cy = g_h * 0.5f;
+    int ids[1] = {0}; float xs[1] = { cx }, ys[1] = { cy };
+    switch (g_dtap_step) {
+      case 0: inject(env, thiz, unity_motionevent(AMOTION_ACTION_DOWN, 1, ids, xs, ys), 0); break; /* tap 1 down */
+      case 1: inject(env, thiz, unity_motionevent(AMOTION_ACTION_UP,   1, ids, xs, ys), 0); break; /* tap 1 up   */
+      case 2: /* gap frame, nothing */ break;
+      case 3: inject(env, thiz, unity_motionevent(AMOTION_ACTION_DOWN, 1, ids, xs, ys), 0); break; /* tap 2 down */
+      case 4: inject(env, thiz, unity_motionevent(AMOTION_ACTION_UP,   1, ids, xs, ys), 0); break; /* tap 2 up   */
+    }
+    g_dtap_step++;
+    if (g_dtap_step > 4) g_dtap_step = -1;   /* sequence done */
   }
 }
